@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quebra-Blocos</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: #12121a;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #wrap {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #game {
+    position: relative;
+    background: linear-gradient(160deg, #1b1b2b 0%, #232338 60%, #1a1a28 100%);
+    border-radius: 12px;
+    box-shadow: 0 0 60px rgba(120, 80, 220, .25);
+    overflow: hidden;
+  }
+  canvas { display: block; }
+  #hud {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    pointer-events: none;
+    color: #fff;
+  }
+  #turno { font-size: 34px; font-weight: 800; opacity: .95; }
+  #recorde { font-size: 13px; opacity: .55; margin-top: 2px; }
+  #btnRapido {
+    pointer-events: auto;
+    background: rgba(255,255,255,.12);
+    border: 1px solid rgba(255,255,255,.25);
+    color: #fff;
+    font-size: 20px;
+    border-radius: 10px;
+    padding: 8px 14px;
+    cursor: pointer;
+    display: none;
+  }
+  #btnRapido.on { background: #f5c518; color: #222; border-color: #f5c518; }
+  #overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(10, 10, 18, .82);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    color: #fff;
+    text-align: center;
+    z-index: 10;
+  }
+  #overlay h1 { font-size: 42px; font-weight: 800; }
+  #overlay p { font-size: 16px; opacity: .8; max-width: 340px; line-height: 1.5; }
+  #overlay .placar { font-size: 22px; }
+  #overlay button {
+    margin-top: 8px;
+    background: #34c759;
+    border: none;
+    color: #fff;
+    font-size: 18px;
+    font-weight: 700;
+    padding: 14px 38px;
+    border-radius: 30px;
+    cursor: pointer;
+    box-shadow: 0 4px 20px rgba(52, 199, 89, .4);
+  }
+  #overlay button:hover { transform: scale(1.04); }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="game">
+    <canvas id="cv"></canvas>
+    <div id="hud">
+      <div>
+        <div id="turno">1</div>
+        <div id="recorde"></div>
+      </div>
+      <button id="btnRapido" title="Acelerar">&#9889;</button>
+    </div>
+    <div id="overlay">
+      <h1>Quebra-Blocos</h1>
+      <p>Mire com o mouse e clique para lançar as bolas.<br>
+         O número no bloco diz quantas batidas faltam.<br>
+         Colete <b style="color:#7fd4ff">&#9679;</b> para ganhar mais bolas.<br>
+         Não deixe os blocos chegarem embaixo!</p>
+      <div class="placar hidden" id="placarFinal"></div>
+      <button id="btnJogar">Jogar</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  // ---------- Configuração ----------
+  const COLS = 7;
+  const W = 420;
+  const H = 640;
+  const TOP = 64;              // área do HUD
+  const CELL = W / COLS;       // 60
+  const GAP = 4;
+  const BALL_R = 7;
+  const BALL_SPEED = 620;      // px/s
+  const LAUNCH_INTERVAL = 0.09; // s entre bolas
+  const FLOOR = H - 20;
+  const MAX_ROW = Math.floor((FLOOR - TOP) / CELL) - 1; // linha que causa game over
+
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = W * dpr; cv.height = H * dpr;
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  ctx.scale(dpr, dpr);
+
+  const elTurno = document.getElementById('turno');
+  const elRecorde = document.getElementById('recorde');
+  const btnRapido = document.getElementById('btnRapido');
+  const overlay = document.getElementById('overlay');
+  const btnJogar = document.getElementById('btnJogar');
+  const placarFinal = document.getElementById('placarFinal');
+
+  // ---------- Estado ----------
+  let blocks = [];      // {col, row, hp}
+  let pickups = [];     // {col, row, coletado}
+  let balls = [];       // {x, y, vx, vy, ativa}
+  let turn = 1;
+  let ballCount = 1;
+  let launchX = W / 2;
+  let nextLaunchX = null;
+  let fase = 'mira';    // 'mira' | 'voando' | 'fim'
+  let aim = { x: W / 2, y: TOP + 100 };
+  let toLaunch = 0, launchTimer = 0;
+  let speedMult = 1;
+  const RECORDE_RESGATADO = 179; // rodada alcançada em 19/07/2026, antes do save contínuo existir
+  let best = RECORDE_RESGATADO;
+  try { best = Math.max(RECORDE_RESGATADO, parseInt(localStorage.getItem('qb_recorde') || '0', 10)); } catch (e) {}
+
+  function salvarRecorde() {
+    if (turn > best) {
+      best = turn;
+      try { localStorage.setItem('qb_recorde', String(best)); } catch (e) {}
+    }
+  }
+
+  function hpColor(hp) {
+    // gradiente por vida restante
+    if (hp <= 3) return '#f5c518';       // amarelo
+    if (hp <= 6) return '#ff9f0a';       // laranja
+    if (hp <= 12) return '#34c759';      // verde
+    if (hp <= 20) return '#5ac8fa';      // azul
+    if (hp <= 35) return '#af52de';      // roxo
+    return '#ff375f';                    // rosa/vermelho
+  }
+
+  function novaLinha() {
+    const livres = [...Array(COLS).keys()];
+    // embaralha
+    for (let i = livres.length - 1; i > 0; i--) {
+      const j = (Math.random() * (i + 1)) | 0;
+      [livres[i], livres[j]] = [livres[j], livres[i]];
+    }
+    const nBlocos = 2 + ((Math.random() * 3) | 0) + (Math.random() < 0.25 ? 1 : 0); // 2..5
+    for (let i = 0; i < nBlocos && i < livres.length - 1; i++) {
+      const hp = Math.random() < 0.12 ? turn * 2 : Math.max(1, Math.round(turn * (0.6 + Math.random() * 0.7)));
+      blocks.push({ col: livres[i], row: 0, hp });
+    }
+    // pickup de bola extra numa coluna livre
+    pickups.push({ col: livres[nBlocos], row: 0, coletado: false });
+  }
+
+  function descerLinhas() {
+    for (const b of blocks) b.row++;
+    for (const p of pickups) p.row++;
+    // pickups que chegam embaixo são coletados automaticamente
+    pickups = pickups.filter(p => {
+      if (p.row >= MAX_ROW) { ballCount++; return false; }
+      return true;
+    });
+  }
+
+  function iniciar() {
+    blocks = []; pickups = []; balls = [];
+    turn = 1; ballCount = 1; launchX = W / 2;
+    fase = 'mira'; speedMult = 1;
+    btnRapido.classList.remove('on');
+    novaLinha(); descerLinhas();
+    atualizarHUD();
+    overlay.classList.add('hidden');
+  }
+
+  function atualizarHUD() {
+    elTurno.textContent = turn;
+    elRecorde.textContent = best > 0 ? 'Recorde: ' + best : '';
+  }
+
+  function gameOver() {
+    fase = 'fim';
+    salvarRecorde();
+    placarFinal.innerHTML = 'Você chegou à rodada <b>' + turn + '</b><br>Recorde: <b>' + best + '</b>';
+    placarFinal.classList.remove('hidden');
+    overlay.querySelector('h1').textContent = 'Fim de jogo';
+    overlay.querySelector('p').classList.add('hidden');
+    btnJogar.textContent = 'Jogar de novo';
+    overlay.classList.remove('hidden');
+  }
+
+  // ---------- Geometria dos blocos ----------
+  function blockRect(b) {
+    return {
+      x: b.col * CELL + GAP / 2,
+      y: TOP + b.row * CELL + GAP / 2,
+      w: CELL - GAP,
+      h: CELL - GAP
+    };
+  }
+  function pickupPos(p) {
+    return { x: p.col * CELL + CELL / 2, y: TOP + p.row * CELL + CELL / 2 };
+  }
+
+  // ---------- Física ----------
+  function stepBall(ball, dt) {
+    let restante = dt;
+    // sub-passos para evitar atravessar blocos
+    const passo = 4 / BALL_SPEED; // ~4px por sub-passo
+    while (restante > 0 && ball.ativa) {
+      const h = Math.min(passo, restante);
+      restante -= h;
+      ball.x += ball.vx * h;
+      ball.y += ball.vy * h;
+
+      // paredes
+      if (ball.x < BALL_R) { ball.x = BALL_R; ball.vx = Math.abs(ball.vx); }
+      if (ball.x > W - BALL_R) { ball.x = W - BALL_R; ball.vx = -Math.abs(ball.vx); }
+      if (ball.y < TOP + BALL_R) { ball.y = TOP + BALL_R; ball.vy = Math.abs(ball.vy); }
+
+      // chão: bola termina
+      if (ball.y > FLOOR - BALL_R) {
+        ball.ativa = false;
+        if (nextLaunchX === null) nextLaunchX = Math.max(BALL_R, Math.min(W - BALL_R, ball.x));
+        break;
+      }
+
+      // colisão com blocos
+      for (const b of blocks) {
+        if (b.hp <= 0) continue;
+        const r = blockRect(b);
+        const cx = Math.max(r.x, Math.min(ball.x, r.x + r.w));
+        const cy = Math.max(r.y, Math.min(ball.y, r.y + r.h));
+        const dx = ball.x - cx, dy = ball.y - cy;
+        if (dx * dx + dy * dy <= BALL_R * BALL_R) {
+          // decide o lado da batida pela menor penetração
+          const overL = (ball.x + BALL_R) - r.x;
+          const overR = (r.x + r.w) - (ball.x - BALL_R);
+          const overT = (ball.y + BALL_R) - r.y;
+          const overB = (r.y + r.h) - (ball.y - BALL_R);
+          const minO = Math.min(overL, overR, overT, overB);
+          if (minO === overT) { ball.y = r.y - BALL_R; ball.vy = -Math.abs(ball.vy); }
+          else if (minO === overB) { ball.y = r.y + r.h + BALL_R; ball.vy = Math.abs(ball.vy); }
+          else if (minO === overL) { ball.x = r.x - BALL_R; ball.vx = -Math.abs(ball.vx); }
+          else { ball.x = r.x + r.w + BALL_R; ball.vx = Math.abs(ball.vx); }
+          b.hp--;
+          break;
+        }
+      }
+
+      // pickups
+      for (const p of pickups) {
+        if (p.coletado) continue;
+        const pos = pickupPos(p);
+        const dx = ball.x - pos.x, dy = ball.y - pos.y;
+        if (dx * dx + dy * dy < (BALL_R + 12) * (BALL_R + 12)) {
+          p.coletado = true;
+          ballCount++;
+        }
+      }
+    }
+  }
+
+  function fimDaRodada() {
+    blocks = blocks.filter(b => b.hp > 0);
+    pickups = pickups.filter(p => !p.coletado);
+    if (nextLaunchX !== null) launchX = nextLaunchX;
+    nextLaunchX = null;
+    balls = [];
+    turn++;
+    salvarRecorde(); // grava a cada rodada, não só no game over
+    novaLinha();
+    descerLinhas();
+    atualizarHUD();
+    speedMult = 1;
+    btnRapido.classList.remove('on');
+    btnRapido.style.display = 'none';
+    // game over?
+    if (blocks.some(b => b.row >= MAX_ROW)) { gameOver(); return; }
+    fase = 'mira';
+  }
+
+  // ---------- Loop ----------
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+
+    if (fase === 'voando') {
+      const sdt = dt * speedMult;
+      if (toLaunch > 0) {
+        launchTimer -= sdt;
+        while (launchTimer <= 0 && toLaunch > 0) {
+          balls.push({ x: launchX, y: FLOOR - BALL_R, vx: dirX * BALL_SPEED, vy: dirY * BALL_SPEED, ativa: true });
+          toLaunch--;
+          launchTimer += LAUNCH_INTERVAL;
+        }
+      }
+      for (const ball of balls) if (ball.ativa) stepBall(ball, sdt);
+      if (toLaunch === 0 && balls.every(b => !b.ativa)) fimDaRodada();
+    }
+
+    desenhar();
+    requestAnimationFrame(loop);
+  }
+
+  // ---------- Desenho ----------
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function desenhar() {
+    ctx.clearRect(0, 0, W, H);
+
+    // linha de perigo
+    ctx.strokeStyle = 'rgba(255, 80, 80, .25)';
+    ctx.setLineDash([6, 6]);
+    ctx.beginPath();
+    ctx.moveTo(0, TOP + MAX_ROW * CELL);
+    ctx.lineTo(W, TOP + MAX_ROW * CELL);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // blocos
+    for (const b of blocks) {
+      if (b.hp <= 0) continue;
+      const r = blockRect(b);
+      ctx.fillStyle = hpColor(b.hp);
+      roundRect(r.x, r.y, r.w, r.h, 8);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,.95)';
+      ctx.font = '700 20px -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(b.hp, r.x + r.w / 2, r.y + r.h / 2 + 1);
+    }
+
+    // pickups (+bola)
+    for (const p of pickups) {
+      if (p.coletado) continue;
+      const pos = pickupPos(p);
+      const t = performance.now() / 400;
+      const pulso = 10 + Math.sin(t + p.col) * 1.5;
+      ctx.strokeStyle = '#7fd4ff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, pulso + 5, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = '#7fd4ff';
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.lineWidth = 1;
+    }
+
+    // mira
+    if (fase === 'mira') {
+      const dx = aim.x - launchX, dy = aim.y - (FLOOR - BALL_R);
+      const len = Math.hypot(dx, dy) || 1;
+      let ux = dx / len, uy = dy / len;
+      // limita ângulo para não ficar rasteiro demais
+      if (uy > -0.08) { uy = -0.08; ux = Math.sign(ux || 1) * Math.sqrt(1 - uy * uy); }
+      ctx.fillStyle = 'rgba(255,255,255,.85)';
+      for (let i = 1; i <= 14; i++) {
+        const px = launchX + ux * i * 26;
+        const py = (FLOOR - BALL_R) + uy * i * 26;
+        if (px < 0 || px > W || py < TOP) break;
+        ctx.beginPath();
+        ctx.arc(px, py, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // bola(s) na base
+    if (fase === 'mira' || toLaunch > 0) {
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(launchX, FLOOR - BALL_R, BALL_R, 0, Math.PI * 2);
+      ctx.fill();
+      if (fase === 'mira') {
+        ctx.fillStyle = 'rgba(255,255,255,.8)';
+        ctx.font = '600 13px -apple-system, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('x' + ballCount, launchX, FLOOR - BALL_R - 18);
+      }
+    }
+
+    // ponto de pouso da próxima rodada
+    if (fase === 'voando' && nextLaunchX !== null) {
+      ctx.fillStyle = 'rgba(255,255,255,.4)';
+      ctx.beginPath();
+      ctx.arc(nextLaunchX, FLOOR - BALL_R, BALL_R, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // bolas voando
+    ctx.fillStyle = '#fff';
+    for (const ball of balls) {
+      if (!ball.ativa) continue;
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, BALL_R, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // ---------- Controles ----------
+  let dirX = 0, dirY = -1;
+
+  function posDoEvento(e) {
+    const rect = cv.getBoundingClientRect();
+    const cx = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+    const cy = (e.touches ? e.touches[0].clientY : e.clientY) - rect.top;
+    return { x: cx, y: cy };
+  }
+
+  cv.addEventListener('mousemove', e => {
+    if (fase !== 'mira') return;
+    aim = posDoEvento(e);
+  });
+
+  function atirar(e) {
+    if (fase !== 'mira') return;
+    const p = posDoEvento(e);
+    const dx = p.x - launchX, dy = p.y - (FLOOR - BALL_R);
+    if (dy > -8) return; // precisa mirar para cima
+    const len = Math.hypot(dx, dy) || 1;
+    let ux = dx / len, uy = dy / len;
+    if (uy > -0.08) { uy = -0.08; ux = Math.sign(ux || 1) * Math.sqrt(1 - uy * uy); }
+    dirX = ux; dirY = uy;
+    toLaunch = ballCount;
+    launchTimer = 0;
+    fase = 'voando';
+    btnRapido.style.display = 'block';
+  }
+  cv.addEventListener('click', atirar);
+  cv.addEventListener('touchend', e => { e.preventDefault(); atirar(e.changedTouches ? { clientX: e.changedTouches[0].clientX, clientY: e.changedTouches[0].clientY } : e); });
+  cv.addEventListener('touchmove', e => { e.preventDefault(); if (fase === 'mira') aim = posDoEvento(e); }, { passive: false });
+
+  btnRapido.addEventListener('click', () => {
+    speedMult = speedMult === 1 ? 3 : 1;
+    btnRapido.classList.toggle('on', speedMult > 1);
+  });
+
+  btnJogar.addEventListener('click', () => {
+    overlay.querySelector('p').classList.remove('hidden');
+    overlay.querySelector('h1').textContent = 'Quebra-Blocos';
+    placarFinal.classList.add('hidden');
+    iniciar();
+  });
+
+  atualizarHUD();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
